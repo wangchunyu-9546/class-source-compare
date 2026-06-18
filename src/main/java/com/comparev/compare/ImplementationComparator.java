@@ -44,7 +44,7 @@ public class ImplementationComparator {
                         IssueType.IMPLEMENTATION_COMPARE,
                         "",
                         "",
-                        "方法实现分析失败：" + exception.getMessage(),
+                        "方法实现分析失败：" + shortMessage(exception),
                         Severity.WARNING));
             }
         }
@@ -53,8 +53,8 @@ public class ImplementationComparator {
 
     private void compareClass(ClassInfo fieldClass, ClassInfo sourceClass, List<CompatibilityIssue> issues) throws IOException {
         DecompiledSource decompiledSource = decompiler.decompile(fieldClass);
-        Map<String, MethodBodyInfo> fieldMethods = extractor.extract(decompiledSource.sourceText());
-        Map<String, MethodBodyInfo> sourceMethods = extractor.extract(sourceClass.sourcePath());
+        Map<String, MethodBodyInfo> fieldMethods = extractor.extract(decompiledSource.sourceText(), fieldClass);
+        Map<String, MethodBodyInfo> sourceMethods = extractor.extract(sourceClass.sourcePath(), sourceClass);
 
         for (MethodInfo fieldMethod : fieldClass.methods()) {
             String methodKey = MethodBodyExtractor.methodKey(fieldClass.className(), fieldMethod);
@@ -78,5 +78,14 @@ public class ImplementationComparator {
                     fieldBodyText,
                     sourceBodyText));
         }
+    }
+
+    private String shortMessage(Exception exception) {
+        String message = exception.getMessage();
+        if (message == null || message.trim().isEmpty()) {
+            return exception.getClass().getSimpleName();
+        }
+        String firstLine = message.split("\\r?\\n", 2)[0];
+        return firstLine.length() > 240 ? firstLine.substring(0, 240) + "..." : firstLine;
     }
 }

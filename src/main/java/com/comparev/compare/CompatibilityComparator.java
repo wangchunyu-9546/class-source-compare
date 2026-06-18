@@ -73,7 +73,7 @@ public class CompatibilityComparator {
                         IssueType.ACCESS_MISMATCH,
                         fieldMethod.displaySignature(),
                         sourceMethod.displaySignature(),
-                        "方法访问修饰符不同",
+                        "方法访问修饰符不同：现场 " + fieldMethod.accessModifier() + "，本地 " + sourceMethod.accessModifier(),
                         Severity.WARNING));
             }
         }

@@ -25,7 +25,7 @@ public class JavaSourceParser {
         for (ClassOrInterfaceDeclaration declaration : compilationUnit.findAll(ClassOrInterfaceDeclaration.class)) {
             String className = qualifiedClassName(packageName, declaration);
             List<MethodInfo> methods = declaration.getMethods().stream()
-                    .map(this::toMethodInfo)
+                    .map(methodDeclaration -> toMethodInfo(methodDeclaration, declaration.isInterface()))
                     .collect(Collectors.toList());
             classes.add(new ClassInfo(className, packageName, sourceFile, methods));
         }
@@ -44,17 +44,19 @@ public class JavaSourceParser {
         return packageName.trim().isEmpty() ? localName : packageName + "." + localName;
     }
 
-    private MethodInfo toMethodInfo(MethodDeclaration declaration) {
+    private MethodInfo toMethodInfo(MethodDeclaration declaration, boolean interfaceMethod) {
         List<String> parameterTypes = declaration.getParameters().stream()
                 .map(parameter -> parameter.getType().asString())
                 .collect(Collectors.toList());
+        String accessModifier = declaration.getAccessSpecifier().asString().trim();
+        if (accessModifier.isEmpty()) {
+            accessModifier = interfaceMethod ? "public" : "package-private";
+        }
         return new MethodInfo(
                 declaration.getNameAsString(),
                 parameterTypes,
                 declaration.getType().asString(),
-                declaration.getAccessSpecifier().asString().trim().isEmpty()
-                        ? "package-private"
-                        : declaration.getAccessSpecifier().asString(),
+                accessModifier,
                 declaration.isStatic());
     }
 }

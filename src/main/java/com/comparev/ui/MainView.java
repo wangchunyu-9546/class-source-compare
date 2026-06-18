@@ -33,6 +33,7 @@ import javafx.scene.control.TableCell;
 import javafx.scene.control.TableColumn;
 import javafx.scene.control.TableRow;
 import javafx.scene.control.TableView;
+import javafx.scene.control.TextArea;
 import javafx.scene.control.TextField;
 import javafx.scene.control.Tooltip;
 import javafx.scene.input.Clipboard;
@@ -66,6 +67,7 @@ public class MainView extends BorderPane {
     private static final String PREF_INCLUDE_ANONYMOUS = "includeAnonymousInnerClasses";
     private static final String PREF_ANALYZE_IMPLEMENTATION = "analyzeImplementation";
     private static final String PREF_HIDE_HIGH_CONSISTENCY = "hideHighConsistency";
+    private static final String PREF_DEFAULTS_VERSION = "defaultsVersion";
     private static final String PREF_MAIN_X = "mainWindowX";
     private static final String PREF_MAIN_Y = "mainWindowY";
     private static final String PREF_MAIN_WIDTH = "mainWindowWidth";
@@ -88,16 +90,18 @@ public class MainView extends BorderPane {
     private final ObservableList<CompatibilityIssue> issues = FXCollections.observableArrayList();
     private final FilteredList<CompatibilityIssue> filteredIssues = new FilteredList<>(issues);
     private final TableView<CompatibilityIssue> table = new TableView<>(filteredIssues);
+    private final TextArea selectedIssueDetail = new TextArea("请选择一条结果查看详情");
     private final Label statusLabel = new Label("请选择目录后开始扫描");
     private final ProgressIndicator progressIndicator = new ProgressIndicator();
     private int lastFieldClassCount;
     private int lastSourceClassCount;
+    private boolean loadingPreferences;
 
     public MainView(Stage stage) {
         this.stage = stage;
         setPadding(new Insets(14));
         setTop(createControls());
-        setCenter(createTable());
+        setCenter(createMainContent());
         setBottom(createStatusBar());
         configureFilter();
         loadPreferences();
@@ -142,6 +146,22 @@ public class MainView extends BorderPane {
         return controls;
     }
 
+    private SplitPane createMainContent() {
+        SplitPane splitPane = new SplitPane(createTable(), createSelectedIssueDetail());
+        splitPane.setOrientation(javafx.geometry.Orientation.VERTICAL);
+        splitPane.setDividerPositions(0.76);
+        return splitPane;
+    }
+
+    private VBox createSelectedIssueDetail() {
+        selectedIssueDetail.setEditable(false);
+        selectedIssueDetail.setWrapText(true);
+        selectedIssueDetail.setPrefRowCount(7);
+        VBox detailBox = new VBox(6, new Label("选中项详情"), selectedIssueDetail);
+        VBox.setVgrow(selectedIssueDetail, Priority.ALWAYS);
+        return detailBox;
+    }
+
     private TableView<CompatibilityIssue> createTable() {
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY);
         table.getColumns().add(column("等级", issue -> issue.severity().displayName(), 80));
@@ -158,6 +178,7 @@ public class MainView extends BorderPane {
             }
         });
         table.setRowFactory(tableView -> createIssueRow());
+        table.getSelectionModel().selectedItemProperty().addListener((observable, oldValue, newValue) -> updateSelectedIssueDetail(newValue));
         return table;
     }
 
@@ -268,11 +289,11 @@ public class MainView extends BorderPane {
         classFilter.getSelectionModel().selectFirst();
         classFilter.valueProperty().addListener((observable, oldValue, newValue) -> applyFilters());
         hideHighConsistency.selectedProperty().addListener((observable, oldValue, newValue) -> {
-            savePreferences();
+            savePreferencesIfReady();
             applyFilters();
         });
-        includeAnonymousInnerClasses.selectedProperty().addListener((observable, oldValue, newValue) -> savePreferences());
-        analyzeImplementation.selectedProperty().addListener((observable, oldValue, newValue) -> savePreferences());
+        includeAnonymousInnerClasses.selectedProperty().addListener((observable, oldValue, newValue) -> savePreferencesIfReady());
+        analyzeImplementation.selectedProperty().addListener((observable, oldValue, newValue) -> savePreferencesIfReady());
     }
 
     private void applyFilters() {
@@ -293,6 +314,31 @@ public class MainView extends BorderPane {
             }
             return !hideHighConsistency.isSelected() || !isHighConsistencyImplementation(issue);
         });
+        if (!filteredIssues.contains(table.getSelectionModel().getSelectedItem())) {
+            table.getSelectionModel().clearSelection();
+            updateSelectedIssueDetail(null);
+        }
+    }
+
+    private void updateSelectedIssueDetail(CompatibilityIssue issue) {
+        selectedIssueDetail.setText(issue == null ? "请选择一条结果查看详情" : formatSelectedIssueDetail(issue));
+    }
+
+    private String formatSelectedIssueDetail(CompatibilityIssue issue) {
+        StringBuilder builder = new StringBuilder();
+        builder.append("等级：").append(issue.severity().displayName()).append('\n');
+        builder.append("类型：").append(issue.issueType().displayName()).append('\n');
+        builder.append("类名：").append(nullToEmpty(issue.className())).append("\n\n");
+        builder.append("现场方法：\n").append(nullToEmpty(issue.classMethod())).append("\n\n");
+        builder.append("本地方法：\n").append(nullToEmpty(issue.sourceMethod())).append("\n\n");
+        builder.append("相似度：").append(issue.similarityScore() == null ? "-" : issue.similarityScore() + "%").append('\n');
+        builder.append("实现风险：").append(nullToEmpty(issue.implementationRisk())).append("\n\n");
+        builder.append("说明：\n").append(nullToEmpty(issue.message()));
+        return builder.toString();
+    }
+
+    private String nullToEmpty(String value) {
+        return value == null ? "" : value;
     }
 
     private boolean isHighConsistencyImplementation(CompatibilityIssue issue) {
@@ -320,45 +366,74 @@ public class MainView extends BorderPane {
     }
 
     private void updateSummary() {
-        int incompatibleCount = 0;
-        int warningCount = 0;
-        int infoCount = 0;
-        int implementationCount = 0;
-        int similarityTotal = 0;
-        int similarityCount = 0;
+        ScanCounts counts = countIssues();
+        summaryLabel.setText("现场类 " + lastFieldClassCount
+                + " | 源码类 " + lastSourceClassCount
+                + " | 结构问题 " + counts.structureIssueCount
+                + " | 实现需确认 " + counts.implementationReviewCount
+                + " | 高度一致 " + counts.highConsistencyCount
+                + " | 不兼容 " + counts.incompatibleCount
+                + " | 需确认 " + counts.warningCount
+                + " | 提示 " + counts.infoCount
+                + " | 方法实现比对 " + counts.implementationCount
+                + " | 平均相似度 " + counts.averageSimilarity());
+    }
 
+    private ScanCounts countIssues() {
+        ScanCounts counts = new ScanCounts();
         for (CompatibilityIssue issue : issues) {
+            if (issue.issueType() == IssueType.IMPLEMENTATION_COMPARE) {
+                counts.implementationCount++;
+                if (isHighConsistencyImplementation(issue)) {
+                    counts.highConsistencyCount++;
+                } else {
+                    counts.implementationReviewCount++;
+                }
+            } else {
+                counts.structureIssueCount++;
+            }
             switch (issue.severity()) {
                 case ERROR:
-                    incompatibleCount++;
+                    counts.incompatibleCount++;
                     break;
                 case WARNING:
-                    warningCount++;
+                    counts.warningCount++;
                     break;
                 case INFO:
-                    infoCount++;
+                    counts.infoCount++;
                     break;
                 default:
                     break;
             }
-            if (issue.issueType() == IssueType.IMPLEMENTATION_COMPARE) {
-                implementationCount++;
-            }
             if (issue.similarityScore() != null) {
-                similarityTotal += issue.similarityScore();
-                similarityCount++;
+                counts.similarityTotal += issue.similarityScore();
+                counts.similarityCount++;
             }
         }
+        return counts;
+    }
 
-        String averageSimilarity = similarityCount == 0 ? "-" : Math.round((float) similarityTotal / similarityCount) + "%";
-        summaryLabel.setText("现场类 " + lastFieldClassCount
-                + " | 源码类 " + lastSourceClassCount
-                + " | 问题 " + issues.size()
-                + " | 不兼容 " + incompatibleCount
-                + " | 需确认 " + warningCount
-                + " | 提示 " + infoCount
-                + " | 方法实现比对 " + implementationCount
-                + " | 平均相似度 " + averageSimilarity);
+    private String scanCompleteMessage() {
+        ScanCounts counts = countIssues();
+        return "扫描完成：结构问题 " + counts.structureIssueCount
+                + " 个，方法实现需确认 " + counts.implementationReviewCount
+                + " 个，高度一致 " + counts.highConsistencyCount + " 个";
+    }
+
+    private static class ScanCounts {
+        private int structureIssueCount;
+        private int implementationReviewCount;
+        private int highConsistencyCount;
+        private int incompatibleCount;
+        private int warningCount;
+        private int infoCount;
+        private int implementationCount;
+        int similarityTotal = 0;
+        int similarityCount = 0;
+
+        private String averageSimilarity() {
+            return similarityCount == 0 ? "-" : Math.round((float) similarityTotal / similarityCount) + "%";
+        }
     }
 
     private void chooseDirectory(List<Path> inputPaths, TextField targetField, String title) {
@@ -428,12 +503,26 @@ public class MainView extends BorderPane {
     }
 
     private void loadPreferences() {
-        loadInputPaths(PREF_CLASS_INPUTS, classInputPaths, classDirectoryField);
-        loadInputPaths(PREF_SOURCE_INPUTS, sourceInputPaths, sourceDirectoryField);
-        includeAnonymousInnerClasses.setSelected(preferences.getBoolean(PREF_INCLUDE_ANONYMOUS, false));
-        analyzeImplementation.setSelected(preferences.getBoolean(PREF_ANALYZE_IMPLEMENTATION, false));
-        hideHighConsistency.setSelected(preferences.getBoolean(PREF_HIDE_HIGH_CONSISTENCY, false));
-        applyFilters();
+        loadingPreferences = true;
+        try {
+            migratePreferences();
+            loadInputPaths(PREF_CLASS_INPUTS, classInputPaths, classDirectoryField);
+            loadInputPaths(PREF_SOURCE_INPUTS, sourceInputPaths, sourceDirectoryField);
+            includeAnonymousInnerClasses.setSelected(preferences.getBoolean(PREF_INCLUDE_ANONYMOUS, false));
+            analyzeImplementation.setSelected(preferences.getBoolean(PREF_ANALYZE_IMPLEMENTATION, false));
+            hideHighConsistency.setSelected(preferences.getBoolean(PREF_HIDE_HIGH_CONSISTENCY, true));
+            applyFilters();
+        } finally {
+            loadingPreferences = false;
+        }
+    }
+
+    private void migratePreferences() {
+        int defaultsVersion = preferences.getInt(PREF_DEFAULTS_VERSION, 0);
+        if (defaultsVersion < 1) {
+            preferences.putBoolean(PREF_HIDE_HIGH_CONSISTENCY, true);
+            preferences.putInt(PREF_DEFAULTS_VERSION, 1);
+        }
     }
 
     private void loadInputPaths(String key, List<Path> inputPaths, TextField targetField) {
@@ -463,6 +552,12 @@ public class MainView extends BorderPane {
         preferences.putBoolean(PREF_INCLUDE_ANONYMOUS, includeAnonymousInnerClasses.isSelected());
         preferences.putBoolean(PREF_ANALYZE_IMPLEMENTATION, analyzeImplementation.isSelected());
         preferences.putBoolean(PREF_HIDE_HIGH_CONSISTENCY, hideHighConsistency.isSelected());
+    }
+
+    private void savePreferencesIfReady() {
+        if (!loadingPreferences) {
+            savePreferences();
+        }
     }
 
     private String serializePaths(List<Path> inputPaths) {
@@ -519,8 +614,13 @@ public class MainView extends BorderPane {
             refreshClassFilter();
             updateSummary();
             applyFilters();
+            if (!filteredIssues.isEmpty()) {
+                table.getSelectionModel().selectFirst();
+            } else {
+                updateSelectedIssueDetail(null);
+            }
             progressIndicator.setVisible(false);
-            statusLabel.setText("扫描完成，发现问题 " + issues.size() + " 个");
+            statusLabel.setText(scanCompleteMessage());
         });
         task.setOnFailed(event -> {
             statusLabel.textProperty().unbind();
@@ -591,7 +691,7 @@ public class MainView extends BorderPane {
             sourceList.setItems(FXCollections.observableArrayList(visibleDiffLines(diffResult.sourceLines, diffResult.fieldLines, newValue)));
         });
 
-        Label tipLabel = new Label(summaryText(diffResult, issue.fieldImplementation(), issue.sourceImplementation()) + "。白色表示已对齐一致，浅红色表示差异，浅灰色表示注释/空行已忽略比较");
+        Label tipLabel = new Label(summaryText(diffResult, issue.fieldImplementation(), issue.sourceImplementation()) + "。白色表示已对齐一致，浅黄色表示疑似等价写法差异，浅红色表示差异，浅灰色表示注释/空行已忽略比较");
         HBox topBar = new HBox(12, onlyDifferent, tipLabel);
         VBox fieldPane = new VBox(6, new Label("现场反编译方法体"), fieldList);
         VBox sourcePane = new VBox(6, new Label("本地源码方法体"), sourceList);
@@ -634,14 +734,16 @@ public class MainView extends BorderPane {
     }
 
     private boolean isVisibleDifference(DiffStatus status) {
-        return status == DiffStatus.DIFFERENT || status == DiffStatus.MISSING;
+        return status == DiffStatus.DIFFERENT || status == DiffStatus.MISSING || status == DiffStatus.SIMILAR;
     }
 
     private String summaryText(DiffResult diffResult, String fieldText, String sourceText) {
         return "一致 " + diffResult.equalCount
+                + " 行，疑似等价 " + diffResult.similarCount
                 + " 行，差异 " + diffResult.differentCount
                 + " 行，忽略 " + diffResult.ignoredCount
-                + " 行，匹配率 " + diffResult.matchRate() + "%"
+                + " 行，严格匹配率 " + diffResult.strictMatchRate() + "%"
+                + "，宽松匹配率 " + diffResult.looseMatchRate() + "%"
                 + "，调用序列匹配率 " + callSequenceMatchRate(fieldText, sourceText) + "%";
     }
 
@@ -694,6 +796,9 @@ public class MainView extends BorderPane {
         String font = "-fx-font-family: 'Consolas', 'Courier New', monospace;";
         if (status == DiffStatus.IGNORED) {
             return "-fx-background-color: #f3f4f6; -fx-text-fill: #6b7280;" + font;
+        }
+        if (status == DiffStatus.SIMILAR) {
+            return "-fx-background-color: #fff7cc;" + font;
         }
         if (status == DiffStatus.DIFFERENT || status == DiffStatus.MISSING) {
             return "-fx-background-color: #ffe5e5;" + font;
@@ -754,7 +859,25 @@ public class MainView extends BorderPane {
         if (fieldLine.ignored || sourceLine.ignored) {
             return DiffStatus.DIFFERENT;
         }
-        return fieldLine.normalized.equals(sourceLine.normalized) ? DiffStatus.EQUAL : DiffStatus.DIFFERENT;
+        if (fieldLine.normalized.equals(sourceLine.normalized)) {
+            return DiffStatus.EQUAL;
+        }
+        return isProbablyEquivalent(fieldLine, sourceLine) ? DiffStatus.SIMILAR : DiffStatus.DIFFERENT;
+    }
+
+    private boolean isProbablyEquivalent(CodeLine fieldLine, CodeLine sourceLine) {
+        if (CodeNormalizer.lineSimilarity(fieldLine.text, sourceLine.text) >= 72) {
+            return true;
+        }
+        if (CodeNormalizer.isProbablyEquivalentCallLine(fieldLine.text, sourceLine.text)) {
+            return true;
+        }
+        List<String> fieldCalls = CodeNormalizer.extractCallSequence(fieldLine.text);
+        List<String> sourceCalls = CodeNormalizer.extractCallSequence(sourceLine.text);
+        if (!fieldCalls.isEmpty() && fieldCalls.equals(sourceCalls)) {
+            return true;
+        }
+        return false;
     }
 
     private void appendPair(CodeLine fieldLine, CodeLine sourceLine, DiffStatus status, List<DiffLine> fieldDisplay, List<DiffLine> sourceDisplay) {
@@ -826,6 +949,7 @@ public class MainView extends BorderPane {
 
     private enum DiffStatus {
         EQUAL,
+        SIMILAR,
         DIFFERENT,
         IGNORED,
         MISSING
@@ -867,6 +991,7 @@ public class MainView extends BorderPane {
         private final List<DiffLine> fieldLines;
         private final List<DiffLine> sourceLines;
         private final int equalCount;
+        private final int similarCount;
         private final int differentCount;
         private final int ignoredCount;
 
@@ -874,6 +999,7 @@ public class MainView extends BorderPane {
             this.fieldLines = fieldLines;
             this.sourceLines = sourceLines;
             int equal = 0;
+            int similar = 0;
             int different = 0;
             int ignored = 0;
             int max = Math.max(fieldLines.size(), sourceLines.size());
@@ -884,21 +1010,32 @@ public class MainView extends BorderPane {
                     ignored++;
                 } else if (fieldStatus == DiffStatus.EQUAL && sourceStatus == DiffStatus.EQUAL) {
                     equal++;
+                } else if (fieldStatus == DiffStatus.SIMILAR && sourceStatus == DiffStatus.SIMILAR) {
+                    similar++;
                 } else {
                     different++;
                 }
             }
             this.equalCount = equal;
+            this.similarCount = similar;
             this.differentCount = different;
             this.ignoredCount = ignored;
         }
 
-        private int matchRate() {
-            int comparableTotal = equalCount + differentCount;
+        private int strictMatchRate() {
+            int comparableTotal = equalCount + similarCount + differentCount;
             if (comparableTotal == 0) {
                 return 100;
             }
             return Math.round((float) equalCount / comparableTotal * 100);
+        }
+
+        private int looseMatchRate() {
+            int comparableTotal = equalCount + similarCount + differentCount;
+            if (comparableTotal == 0) {
+                return 100;
+            }
+            return Math.round((float) (equalCount + similarCount) / comparableTotal * 100);
         }
     }
 
