@@ -51,13 +51,7 @@ public class MethodSimilarityAnalyzer {
     }
 
     private String normalizeText(String body) {
-        if (body == null) {
-            return "";
-        }
-        return body.replaceAll("/\\*.*?\\*/", "")
-                .replaceAll("//.*", "")
-                .replaceAll("\\s+", "")
-                .trim();
+        return CodeNormalizer.normalizeText(body);
     }
 
     private int textSimilarity(String left, String right) {

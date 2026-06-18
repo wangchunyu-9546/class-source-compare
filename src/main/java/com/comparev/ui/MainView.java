@@ -9,6 +9,7 @@ import com.comparev.report.ExcelReportWriter;
 import com.comparev.report.HtmlReportWriter;
 import com.comparev.scanner.ClassFileScanner;
 import com.comparev.scanner.JavaSourceScanner;
+import com.comparev.similarity.CodeNormalizer;
 import javafx.application.Platform;
 import javafx.beans.property.ReadOnlyStringWrapper;
 import javafx.collections.FXCollections;
@@ -16,6 +17,7 @@ import javafx.collections.ObservableList;
 import javafx.collections.transformation.FilteredList;
 import javafx.concurrent.Task;
 import javafx.geometry.Insets;
+import javafx.geometry.Rectangle2D;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
@@ -43,6 +45,7 @@ import javafx.scene.layout.Priority;
 import javafx.scene.layout.VBox;
 import javafx.stage.DirectoryChooser;
 import javafx.stage.FileChooser;
+import javafx.stage.Screen;
 import javafx.stage.Stage;
 
 import java.io.File;
@@ -63,6 +66,12 @@ public class MainView extends BorderPane {
     private static final String PREF_INCLUDE_ANONYMOUS = "includeAnonymousInnerClasses";
     private static final String PREF_ANALYZE_IMPLEMENTATION = "analyzeImplementation";
     private static final String PREF_HIDE_HIGH_CONSISTENCY = "hideHighConsistency";
+    private static final String PREF_MAIN_X = "mainWindowX";
+    private static final String PREF_MAIN_Y = "mainWindowY";
+    private static final String PREF_MAIN_WIDTH = "mainWindowWidth";
+    private static final String PREF_MAIN_HEIGHT = "mainWindowHeight";
+    private static final String PREF_DETAIL_WIDTH = "detailWindowWidth";
+    private static final String PREF_DETAIL_HEIGHT = "detailWindowHeight";
 
     private final Stage stage;
     private final Preferences preferences = Preferences.userNodeForPackage(MainView.class);
@@ -92,6 +101,7 @@ public class MainView extends BorderPane {
         setBottom(createStatusBar());
         configureFilter();
         loadPreferences();
+        configureWindowPersistence();
     }
 
     private VBox createControls() {
@@ -204,6 +214,47 @@ public class MainView extends BorderPane {
         HBox statusBar = new HBox(10, progressIndicator, statusLabel);
         statusBar.setPadding(new Insets(12, 0, 0, 0));
         return statusBar;
+    }
+
+    private void configureWindowPersistence() {
+        Platform.runLater(this::restoreMainWindowBounds);
+        stage.setOnCloseRequest(event -> saveMainWindowBounds());
+    }
+
+    private void restoreMainWindowBounds() {
+        double width = preferences.getDouble(PREF_MAIN_WIDTH, stage.getWidth());
+        double height = preferences.getDouble(PREF_MAIN_HEIGHT, stage.getHeight());
+        if (width > 400 && height > 300) {
+            stage.setWidth(width);
+            stage.setHeight(height);
+        }
+
+        double x = preferences.getDouble(PREF_MAIN_X, Double.NaN);
+        double y = preferences.getDouble(PREF_MAIN_Y, Double.NaN);
+        if (!Double.isNaN(x) && !Double.isNaN(y) && isOnScreen(x, y, width, height)) {
+            stage.setX(x);
+            stage.setY(y);
+        }
+    }
+
+    private void saveMainWindowBounds() {
+        if (stage.isMaximized() || stage.isIconified()) {
+            return;
+        }
+        preferences.putDouble(PREF_MAIN_X, stage.getX());
+        preferences.putDouble(PREF_MAIN_Y, stage.getY());
+        preferences.putDouble(PREF_MAIN_WIDTH, stage.getWidth());
+        preferences.putDouble(PREF_MAIN_HEIGHT, stage.getHeight());
+    }
+
+    private boolean isOnScreen(double x, double y, double width, double height) {
+        for (Screen screen : Screen.getScreens()) {
+            Rectangle2D bounds = screen.getVisualBounds();
+            if (bounds.intersects(x, y, Math.max(width, 50), Math.max(height, 50))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private void configureFilter() {
@@ -540,7 +591,7 @@ public class MainView extends BorderPane {
             sourceList.setItems(FXCollections.observableArrayList(visibleDiffLines(diffResult.sourceLines, diffResult.fieldLines, newValue)));
         });
 
-        Label tipLabel = new Label(summaryText(diffResult) + "。白色表示已对齐一致，浅红色表示差异，浅灰色表示注释/空行已忽略比较");
+        Label tipLabel = new Label(summaryText(diffResult, issue.fieldImplementation(), issue.sourceImplementation()) + "。白色表示已对齐一致，浅红色表示差异，浅灰色表示注释/空行已忽略比较");
         HBox topBar = new HBox(12, onlyDifferent, tipLabel);
         VBox fieldPane = new VBox(6, new Label("现场反编译方法体"), fieldList);
         VBox sourcePane = new VBox(6, new Label("本地源码方法体"), sourceList);
@@ -552,8 +603,19 @@ public class MainView extends BorderPane {
         BorderPane root = new BorderPane(splitPane);
         root.setTop(topBar);
         root.setPadding(new Insets(10));
-        detailStage.setScene(new javafx.scene.Scene(root, 980, 620));
+        detailStage.setScene(new javafx.scene.Scene(root,
+                preferences.getDouble(PREF_DETAIL_WIDTH, 980),
+                preferences.getDouble(PREF_DETAIL_HEIGHT, 620)));
+        detailStage.setOnCloseRequest(event -> saveDetailWindowBounds(detailStage));
         detailStage.show();
+    }
+
+    private void saveDetailWindowBounds(Stage detailStage) {
+        if (detailStage.isMaximized() || detailStage.isIconified()) {
+            return;
+        }
+        preferences.putDouble(PREF_DETAIL_WIDTH, detailStage.getWidth());
+        preferences.putDouble(PREF_DETAIL_HEIGHT, detailStage.getHeight());
     }
 
     private List<DiffLine> visibleDiffLines(List<DiffLine> lines, List<DiffLine> otherLines, boolean onlyDifferent) {
@@ -575,11 +637,39 @@ public class MainView extends BorderPane {
         return status == DiffStatus.DIFFERENT || status == DiffStatus.MISSING;
     }
 
-    private String summaryText(DiffResult diffResult) {
+    private String summaryText(DiffResult diffResult, String fieldText, String sourceText) {
         return "一致 " + diffResult.equalCount
                 + " 行，差异 " + diffResult.differentCount
                 + " 行，忽略 " + diffResult.ignoredCount
-                + " 行，匹配率 " + diffResult.matchRate() + "%";
+                + " 行，匹配率 " + diffResult.matchRate() + "%"
+                + "，调用序列匹配率 " + callSequenceMatchRate(fieldText, sourceText) + "%";
+    }
+
+    private int callSequenceMatchRate(String fieldText, String sourceText) {
+        List<String> fieldCalls = CodeNormalizer.extractCallSequence(fieldText);
+        List<String> sourceCalls = CodeNormalizer.extractCallSequence(sourceText);
+        if (fieldCalls.isEmpty() && sourceCalls.isEmpty()) {
+            return 100;
+        }
+        int max = Math.max(fieldCalls.size(), sourceCalls.size());
+        if (max == 0) {
+            return 100;
+        }
+        return Math.round((float) lcsStrings(fieldCalls, sourceCalls) / max * 100);
+    }
+
+    private int lcsStrings(List<String> left, List<String> right) {
+        int[][] lengths = new int[left.size() + 1][right.size() + 1];
+        for (int leftIndex = left.size() - 1; leftIndex >= 0; leftIndex--) {
+            for (int rightIndex = right.size() - 1; rightIndex >= 0; rightIndex--) {
+                if (left.get(leftIndex).equals(right.get(rightIndex))) {
+                    lengths[leftIndex][rightIndex] = lengths[leftIndex + 1][rightIndex + 1] + 1;
+                } else {
+                    lengths[leftIndex][rightIndex] = Math.max(lengths[leftIndex + 1][rightIndex], lengths[leftIndex][rightIndex + 1]);
+                }
+            }
+        }
+        return lengths[0][0];
     }
 
     private ListView<DiffLine> createDiffListView(List<DiffLine> lines) {
@@ -698,19 +788,7 @@ public class MainView extends BorderPane {
     }
 
     private String normalizeComparableLine(String line) {
-        String trimmed = line == null ? "" : line.trim();
-        if (trimmed.isEmpty() || trimmed.startsWith("//") || trimmed.startsWith("/*") || trimmed.startsWith("*") || trimmed.endsWith("*/")) {
-            return "";
-        }
-        int commentIndex = trimmed.indexOf("//");
-        if (commentIndex >= 0) {
-            trimmed = trimmed.substring(0, commentIndex).trim();
-        }
-        return trimmed.replaceAll("<[^<>]*>", "")
-                .replaceAll("\\((?:[A-Z][a-zA-Z0-9_$.]*(?:\\[\\])?|byte|short|int|long|float|double|boolean|char)\\)\\s*", "")
-                .replaceAll("\\s+", "")
-                .replace("this.", "")
-                .replace("(Object)", "");
+        return CodeNormalizer.normalizeComparableLine(line);
     }
 
     private List<int[]> lcsMatches(List<CodeLine> left, List<CodeLine> right) {
@@ -743,11 +821,7 @@ public class MainView extends BorderPane {
     }
 
     private List<String> splitLines(String text) {
-        String normalized = text == null ? "" : text.replace("\r\n", "\n").replace('\r', '\n');
-        String[] parts = normalized.split("\n", -1);
-        List<String> lines = new ArrayList<>();
-        Collections.addAll(lines, parts);
-        return lines;
+        return CodeNormalizer.splitLines(text);
     }
 
     private enum DiffStatus {
